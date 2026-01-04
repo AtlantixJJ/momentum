@@ -8,9 +8,8 @@
 #===============================================================================
 
 if(NOT DEFINED ENV{CONDA_PREFIX})
-  message(FATAL_ERROR
-    "CONDA_PREFIX is not set. pymomentum currently only supports building"
-    "with Conda/Pixi. Please ensure you are using a Conda or Pixi environment."
+  message(STATUS
+    "CONDA_PREFIX is not set. Building without Conda/Pixi environment."
   )
 endif()
 
@@ -21,6 +20,13 @@ if(DEFINED ENV{CONDA_BUILD} AND NOT WIN32)
   set(libtorch_base_path $ENV{CONDA_PREFIX})
 else()
   # Windows or PyPI - use site-packages/torch
+  if(NOT DEFINED Python3_SITELIB)
+    execute_process(
+      COMMAND "${Python3_EXECUTABLE}" -c "import sysconfig; print(sysconfig.get_path('purelib'))"
+      OUTPUT_VARIABLE Python3_SITELIB
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+  endif()
   set(libtorch_base_path ${Python3_SITELIB}/torch)
 endif()
 
@@ -32,13 +38,10 @@ if(NOT EXISTS "${libtorch_base_path}")
 endif()
 
 # Try both locations for CMake files (conda and PyPI have different structures)
-# find_package(ATen CONFIG REQUIRED HINTS
-#   ${libtorch_base_path}/share/cmake/ATen
-#   ${libtorch_base_path}
-# )
-set(ATEN_INCLUDE_DIR "")
-set(ATEN_LIBRARIES "")
-
+find_package(ATen CONFIG REQUIRED HINTS
+  ${libtorch_base_path}/share/cmake/ATen
+  ${libtorch_base_path}
+)
 find_package(Torch CONFIG REQUIRED HINTS
   ${libtorch_base_path}/share/cmake/Torch
   ${libtorch_base_path}
@@ -332,6 +335,50 @@ mt_python_library(
 if(MOMENTUM_BUILD_TESTING)
   enable_testing()
   mt_setup_gtest()
+
+  # For SKBUILD (scikit-build-core), the main CMakeLists.txt only requests
+  # Development.Module which doesn't provide Python3::Python. We need to
+  # find a way to link against the Python library for test executables.
+  if(NOT TARGET Python3::Python)
+    # Try to find Development.Embed component which provides Python3::Python
+    find_package(Python3 QUIET COMPONENTS Development.Embed)
+
+    if(NOT TARGET Python3::Python)
+      # If Development.Embed is not available (e.g., in manylinux), try to
+      # create the Python3::Python target manually using the library path
+      if(Python3_LIBRARY)
+        add_library(Python3::Python IMPORTED INTERFACE)
+        set_target_properties(Python3::Python PROPERTIES
+          INTERFACE_INCLUDE_DIRECTORIES "${Python3_INCLUDE_DIRS}"
+          INTERFACE_LINK_LIBRARIES "${Python3_LIBRARY}"
+        )
+        message(STATUS "Created Python3::Python target manually using ${Python3_LIBRARY}")
+      else()
+        # Try to find the library manually
+        find_library(Python3_LIBRARY
+          NAMES python${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}
+                python${Python3_VERSION_MAJOR}
+                python
+          HINTS ${Python3_LIBRARY_DIRS}
+                ${Python3_RUNTIME_LIBRARY_DIRS}
+          PATH_SUFFIXES lib libs
+        )
+        if(Python3_LIBRARY)
+          add_library(Python3::Python IMPORTED INTERFACE)
+          set_target_properties(Python3::Python PROPERTIES
+            INTERFACE_INCLUDE_DIRECTORIES "${Python3_INCLUDE_DIRS}"
+            INTERFACE_LINK_LIBRARIES "${Python3_LIBRARY}"
+          )
+          message(STATUS "Created Python3::Python target manually using ${Python3_LIBRARY}")
+        else()
+          message(FATAL_ERROR
+            "Could not find Python library for linking test executables. "
+            "Please ensure Python development files are installed."
+          )
+        endif()
+      endif()
+    endif()
+  endif()
 
   mt_test(
     NAME tensor_utility_test

@@ -63,9 +63,16 @@ python -c "import pymomentum.geometry as geom; print(dir(geom))"
 ```bash
 git clone https://github.com/facebookresearch/momentum
 cd momentum
+# Option 1: Use pixi (recommended)
 pixi run build      # Builds C++ library and Python bindings
 pixi run test       # Runs tests
 pixi run hello_world  # Runs example
+
+# Option 2: pip only (install deps from conda-forge, then editable install)
+conda create -n momentum python=3.11
+conda activate momentum
+# The script pins PyTorch to 2.5.0 by default; override with MOMENTUM_PYTORCH_VERSION.
+bash scripts/install_with_pip.sh
 ```
 
 **For detailed instructions**, see the comprehensive guides on our website:
