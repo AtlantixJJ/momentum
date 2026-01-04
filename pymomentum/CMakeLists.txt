@@ -99,6 +99,8 @@ mt_library(
     nlohmann_json::nlohmann_json
     pybind11::pybind11
     Python3::Module
+  PUBLIC_COMPILE_OPTIONS
+    ${TORCH_CXX_FLAGS}
   NO_INSTALL
 )
 

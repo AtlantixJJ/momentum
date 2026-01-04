@@ -77,6 +77,7 @@ def main():
     template = env.get_template("pyproject-pypi.toml.j2")
 
     # Generate CPU configs for each Python version
+    """
     for py_ver in ["312", "313"]:
         py_ver_min = f"3.{py_ver[1:]}"
         py_ver_max = f"3.{int(py_ver[1:])+1}"
@@ -98,6 +99,7 @@ def main():
         print(
             f"Generated pyproject-pypi-cpu-py{py_ver}.toml (requires-python: >={py_ver_min},<{py_ver_max})"
         )
+    """
 
     # Generate GPU config (supports Python 3.12+)
     gpu_config = template.render(
