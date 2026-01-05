@@ -11,6 +11,13 @@ endif()
 
 project(momentum)
 
+# Handle C++ ABI compatibility when building with PyTorch
+# MOMENTUM_GLIBCXX_ABI can be set to 0 (old ABI) or 1 (new ABI)
+if(DEFINED MOMENTUM_GLIBCXX_ABI)
+  message(STATUS "Setting _GLIBCXX_USE_CXX11_ABI=${MOMENTUM_GLIBCXX_ABI}")
+  add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=${MOMENTUM_GLIBCXX_ABI})
+endif()
+
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 
 # Needed by mt_defs.cmake

@@ -11,24 +11,12 @@ if ! command -v conda >/dev/null 2>&1; then
 fi
 
 # Parameters
-ENV_NAME="${MOMENTUM_CONDA_ENV:-momentum_build}"
+ENV_NAME="${MOMENTUM_CONDA_ENV:-f4dhuman}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"  # Must be >=3.12 for pymomentum
 FORCE_RECREATE="${FORCE_RECREATE:-0}"
 
 # Activate conda
 eval "$(conda shell.bash hook)"
-
-# Recreate environment if requested
-if [[ "${FORCE_RECREATE}" == "1" ]] && conda env list | awk '{print $1}' | grep -qx "${ENV_NAME}"; then
-  echo "Removing existing conda environment '${ENV_NAME}'..."
-  conda env remove -n "${ENV_NAME}" -y
-fi
-
-# Create new environment if it doesn't exist
-if ! conda env list | awk '{print $1}' | grep -qx "${ENV_NAME}"; then
-  echo "Creating new conda environment '${ENV_NAME}' with Python ${PYTHON_VERSION}..."
-  conda create -n "${ENV_NAME}" python="${PYTHON_VERSION}" -y
-fi
 
 echo "Activating conda env '${ENV_NAME}'..."
 conda activate "${ENV_NAME}"
@@ -150,16 +138,6 @@ fi
 echo "PyTorch CUDA verification passed!"
 
 # ============================================================================
-# STEP 3: Match the C++ ABI to PyTorch everywhere
-# ============================================================================
-TORCH_ABI=$(python -c "import torch; print(int(torch._C._GLIBCXX_USE_CXX11_ABI))")
-export CXXFLAGS="-D_GLIBCXX_USE_CXX11_ABI=${TORCH_ABI} ${CXXFLAGS:-}"
-export CFLAGS="-D_GLIBCXX_USE_CXX11_ABI=${TORCH_ABI} ${CFLAGS:-}"
-export TORCH_CXX_FLAGS="-D_GLIBCXX_USE_CXX11_ABI=${TORCH_ABI} ${TORCH_CXX_FLAGS:-}"
-export CMAKE_ARGS="${CMAKE_ARGS:-} -DMOMENTUM_GLIBCXX_ABI=${TORCH_ABI} -DCMAKE_CXX_FLAGS=-D_GLIBCXX_USE_CXX11_ABI=${TORCH_ABI} -DCMAKE_C_FLAGS=-D_GLIBCXX_USE_CXX11_ABI=${TORCH_ABI}"
-echo "Using PyTorch C++ ABI: ${TORCH_ABI}"
-
-# ============================================================================
 # STEP 4: Setup build environment variables
 # ============================================================================
 export CMAKE_PREFIX_PATH="${CONDA_PREFIX}"
@@ -167,7 +145,7 @@ export CUDA_HOME="${CONDA_PREFIX}"
 export CUDA_TOOLKIT_ROOT_DIR="${CONDA_PREFIX}"
 export CUDACXX="${CONDA_PREFIX}/bin/nvcc"
 export PATH="${CONDA_PREFIX}/bin:${PATH}"
-export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${CONDA_PREFIX}/lib/stubs"
+export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${CONDA_PREFIX}/lib/stubs:${LD_LIBRARY_PATH:-}"
 # CRITICAL: Set LIBRARY_PATH for the linker to find CUDA static libraries during compilation
 export LIBRARY_PATH="${CONDA_PREFIX}/lib:${CONDA_PREFIX}/lib/stubs:${LIBRARY_PATH:-}"
 # Also set CPATH for header files
@@ -180,78 +158,7 @@ export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH}:${TORCH_CMAKE_PATH}"
 echo "Using Torch at: ${TORCH_CMAKE_PATH}"
 
 # ============================================================================
-# STEP 5: Build old-ABI dependencies when PyTorch uses ABI=0
-# ============================================================================
-if [[ "${TORCH_ABI}" == "0" ]]; then
-  DEPS_PREFIX="${PWD}/build/deps-install"
-  mkdir -p "${DEPS_PREFIX}"
-
-  COMMON_CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=${DEPS_PREFIX} -DBUILD_SHARED_LIBS=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_CXX_FLAGS=-D_GLIBCXX_USE_CXX11_ABI=${TORCH_ABI} -DCMAKE_C_FLAGS=-D_GLIBCXX_USE_CXX11_ABI=${TORCH_ABI}"
-
-  CONSOLE_BRIDGE_SRC="${PWD}/build/console_bridge-src"
-  if [[ ! -d "${CONSOLE_BRIDGE_SRC}" ]]; then
-    echo "Cloning console_bridge source..."
-    git clone --depth 1 https://github.com/ros/console_bridge.git "${CONSOLE_BRIDGE_SRC}"
-  fi
-  echo "Building console_bridge (ABI=${TORCH_ABI})..."
-  cmake -S "${CONSOLE_BRIDGE_SRC}" -B "${CONSOLE_BRIDGE_SRC}/build" ${COMMON_CMAKE_FLAGS}
-  cmake --build "${CONSOLE_BRIDGE_SRC}/build" --target install -j"$(nproc)"
-
-  URDFDOM_HEADERS_SRC="${PWD}/build/urdfdom_headers-src"
-  if [[ ! -d "${URDFDOM_HEADERS_SRC}" ]]; then
-    echo "Cloning urdfdom_headers source..."
-    git clone --depth 1 https://github.com/ros/urdfdom_headers.git "${URDFDOM_HEADERS_SRC}"
-  fi
-  echo "Building urdfdom_headers (ABI=${TORCH_ABI})..."
-  cmake -S "${URDFDOM_HEADERS_SRC}" -B "${URDFDOM_HEADERS_SRC}/build" ${COMMON_CMAKE_FLAGS}
-  cmake --build "${URDFDOM_HEADERS_SRC}/build" --target install -j"$(nproc)"
-
-  URDFDOM_SRC="${PWD}/build/urdfdom-src"
-  if [[ ! -d "${URDFDOM_SRC}" ]]; then
-    echo "Cloning urdfdom source..."
-    git clone --depth 1 https://github.com/ros/urdfdom.git "${URDFDOM_SRC}"
-  fi
-  echo "Building urdfdom (ABI=${TORCH_ABI})..."
-  cmake -S "${URDFDOM_SRC}" -B "${URDFDOM_SRC}/build" ${COMMON_CMAKE_FLAGS} \
-    -DCMAKE_PREFIX_PATH="${DEPS_PREFIX}" \
-    -Dconsole_bridge_DIR="${DEPS_PREFIX}/lib/cmake/console_bridge" \
-    -Durdfdom_headers_DIR="${DEPS_PREFIX}/lib/cmake/urdfdom_headers"
-  cmake --build "${URDFDOM_SRC}/build" --target install -j"$(nproc)"
-
-  ABSL_SRC="${PWD}/build/abseil-cpp-src"
-  if [[ ! -d "${ABSL_SRC}" ]]; then
-    echo "Cloning abseil-cpp source..."
-    git clone --depth 1 --branch 20250512.0 https://github.com/abseil/abseil-cpp.git "${ABSL_SRC}"
-  fi
-  echo "Building abseil-cpp (ABI=${TORCH_ABI})..."
-  cmake -S "${ABSL_SRC}" -B "${ABSL_SRC}/build" ${COMMON_CMAKE_FLAGS} \
-    -DABSL_BUILD_TESTING=OFF -DABSL_PROPAGATE_CXX_STD=ON
-  cmake --build "${ABSL_SRC}/build" --target install -j"$(nproc)"
-
-  RE2_SRC="${PWD}/build/re2-src"
-  if [[ ! -d "${RE2_SRC}" ]]; then
-    echo "Cloning re2 source..."
-    git clone --depth 1 https://github.com/google/re2.git "${RE2_SRC}"
-  fi
-  echo "Building re2 (ABI=${TORCH_ABI})..."
-  cmake -S "${RE2_SRC}" -B "${RE2_SRC}/build" ${COMMON_CMAKE_FLAGS} -DRE2_BUILD_TESTING=OFF \
-    -DCMAKE_PREFIX_PATH="${DEPS_PREFIX}"
-  cmake --build "${RE2_SRC}/build" --target install -j"$(nproc)"
-
-  export CMAKE_PREFIX_PATH="${DEPS_PREFIX}:${CMAKE_PREFIX_PATH}"
-  export LD_LIBRARY_PATH="${DEPS_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
-  export LIBRARY_PATH="${DEPS_PREFIX}/lib:${LIBRARY_PATH:-}"
-  export CPATH="${DEPS_PREFIX}/include:${CPATH:-}"
-
-  # Ensure deps install rpaths don't point at unrelated conda envs.
-  if command -v patchelf >/dev/null 2>&1; then
-    find "${DEPS_PREFIX}/lib" -name 'libabsl_*.so*' -print0 | xargs -0 -P 8 -n 1 patchelf --set-rpath "${DEPS_PREFIX}/lib"
-    patchelf --set-rpath "${DEPS_PREFIX}/lib" "${DEPS_PREFIX}/lib/libre2.so.11"
-  fi
-fi
-
-# ============================================================================
-# STEP 6: Generate pyproject.toml variants and build wheel
+# STEP 5: Generate pyproject.toml variants and build wheel
 # ============================================================================
 echo "Generating pyproject.toml variants..."
 python scripts/generate_pyproject.py --torch-min-py312 2.5.1 --torch-max-py312 2.6
@@ -268,16 +175,14 @@ cp pyproject.toml pyproject.toml.bak
 # Copy variant to pyproject.toml
 cp "pyproject-pypi-${VARIANT}.toml" pyproject.toml 2>/dev/null || cp "pyproject-pypi-${VARIANT}-py${PY_SUFFIX}.toml" pyproject.toml
 
-# Clean build artifacts but keep deps-install
-rm -rf dist
-rm -rf build/cp*
+# Clean build artifacts
+rm -rf dist build
 mkdir -p dist
 
 # Build wheel with CMAKE_ARGS
-export CMAKE_ARGS="${CMAKE_ARGS:-} -DMOMENTUM_ENABLE_FBX_SAVING=OFF -DMOMENTUM_ENABLE_SIMD=OFF -DMOMENTUM_USE_SYSTEM_GOOGLETEST=ON -DMOMENTUM_USE_SYSTEM_PYBIND11=OFF -DMOMENTUM_USE_SYSTEM_RERUN_CPP_SDK=ON -DBUILD_SHARED_LIBS=OFF -DMOMENTUM_BUILD_RENDERER=OFF -Ddrjit_DIR=${CONDA_PREFIX}/share/cmake/drjit -DCMAKE_INSTALL_RPATH=${CONDA_PREFIX}/lib:\\$ORIGIN/../torch/lib -DCMAKE_BUILD_RPATH=${CONDA_PREFIX}/lib -DCMAKE_INSTALL_RPATH_USE_LINK_PATH=OFF"
-if [[ -n "${DEPS_PREFIX:-}" ]]; then
-  export CMAKE_ARGS="${CMAKE_ARGS} -DCMAKE_PREFIX_PATH=${DEPS_PREFIX}\;${CONDA_PREFIX} -Durdfdom_DIR=${DEPS_PREFIX}/lib/cmake/urdfdom -Dconsole_bridge_DIR=${DEPS_PREFIX}/lib/cmake/console_bridge -Durdfdom_headers_DIR=${DEPS_PREFIX}/lib/cmake/urdfdom_headers -Dre2_DIR=${DEPS_PREFIX}/lib/cmake/re2"
-fi
+export CMAKE_ARGS="-DMOMENTUM_ENABLE_FBX_SAVING=OFF -DMOMENTUM_ENABLE_SIMD=OFF -DMOMENTUM_USE_SYSTEM_GOOGLETEST=ON -DMOMENTUM_USE_SYSTEM_PYBIND11=OFF -DMOMENTUM_USE_SYSTEM_RERUN_CPP_SDK=ON -DBUILD_SHARED_LIBS=OFF -DMOMENTUM_BUILD_RENDERER=OFF -Ddrjit_DIR=${CONDA_PREFIX}/share/cmake/drjit"
+
+pip install -e . --no-deps --no-build-isolation
 
 echo "Running pip wheel..."
 pip wheel . --no-deps --no-build-isolation --wheel-dir=dist
@@ -289,9 +194,6 @@ mv pyproject.toml.bak pyproject.toml
 # STEP 6: Repair wheel
 # ============================================================================
 echo "Repairing wheel with auditwheel..."
-if [[ -n "${DEPS_PREFIX:-}" ]] && [[ -d "${DEPS_PREFIX}/lib" ]]; then
-  export LD_LIBRARY_PATH="${DEPS_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
-fi
 auditwheel repair \
     --exclude 'libtorch*.so' --exclude 'libc10*.so' \
     --exclude 'libcu*.so*' --exclude 'libnv*.so*' --exclude 'libmkl*.so' \
@@ -302,19 +204,6 @@ echo "Done. Wheel is in dist/repaired/"
 # List generated wheel
 WHEEL_FILE=$(find dist -maxdepth 1 -name "*.whl" | head -n 1)
 echo "Generated wheel: ${WHEEL_FILE}"
-
-# Optional: install wheel into the build env and patch rpaths for local testing.
-INSTALL_WHEEL="${MOMENTUM_INSTALL_WHEEL:-1}"
-if [[ "${INSTALL_WHEEL}" == "1" ]]; then
-  echo "Installing wheel into '${ENV_NAME}'..."
-  pip install --force-reinstall --no-deps "${WHEEL_FILE}"
-  if [[ -n "${DEPS_PREFIX:-}" ]] && command -v patchelf >/dev/null 2>&1; then
-    echo "Patching pymomentum rpaths to prefer local deps..."
-    for so in "${CONDA_PREFIX}"/lib/python*/site-packages/pymomentum/*.so; do
-      patchelf --set-rpath "${DEPS_PREFIX}/lib:${CONDA_PREFIX}/lib:\$ORIGIN/../torch/lib" "${so}"
-    done
-  fi
-fi
 
 # Final summary
 echo ""

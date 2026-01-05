@@ -17,6 +17,7 @@ FORCE_RECREATE="${FORCE_RECREATE:-0}"
 TORCH_MIN_PY312="${MOMENTUM_TORCH_MIN_PY312:-2.5.1}"
 TORCH_MAX_PY312="${MOMENTUM_TORCH_MAX_PY312:-2.6}"
 CUDA_VERSION="${MOMENTUM_CUDA_VERSION:-12.1}"
+SKIP_CUDA_DEV="${MOMENTUM_SKIP_CUDA_DEV:-0}"
 
 eval "$(conda shell.bash hook)"
 
@@ -52,15 +53,37 @@ fi
 echo "Activating build env '${BUILD_ENV_NAME}'..."
 conda activate "${BUILD_ENV_NAME}"
 
-# Install CUDA dev tools from nvidia channel (match pytorch-cuda=12.1)
-echo "Installing CUDA ${CUDA_VERSION} development tools from nvidia channel..."
-conda install -y -c nvidia -c conda-forge \
-  "cuda-cudart-dev=${CUDA_VERSION}.*" \
-  "cuda-cudart-static=${CUDA_VERSION}.*" \
-  "cuda-nvcc=${CUDA_VERSION}.*" \
-  "cuda-nvrtc-dev=${CUDA_VERSION}.*" \
-  "libcublas-dev=${CUDA_VERSION}.*" \
-  "cuda-cccl=${CUDA_VERSION}.*"
+echo "First verification of PyTorch CUDA..."
+CUDA_AVAILABLE=$(python -c "import torch; print(torch.cuda.is_available())")
+TORCH_VERSION=$(python -c "import torch; print(torch.__version__)")
+TORCH_CUDA_VERSION=$(python -c "import torch; print(torch.version.cuda)")
+CUDA_VERSION="${MOMENTUM_CUDA_VERSION:-${TORCH_CUDA_VERSION}}"
+
+echo "PyTorch version: ${TORCH_VERSION}"
+echo "CUDA version: ${TORCH_CUDA_VERSION}"
+echo "CUDA available: ${CUDA_AVAILABLE}"
+
+if [[ "${CUDA_AVAILABLE}" != "True" ]]; then
+  echo "ERROR: PyTorch CUDA was replaced/broken during dependency installation!" >&2
+  echo "Please investigate the conda dependency resolution." >&2
+  exit 1
+fi
+echo "PyTorch CUDA verification passed!"
+
+
+if [[ "${SKIP_CUDA_DEV}" != "1" ]]; then
+  # Install CUDA dev tools from nvidia channel (match torch CUDA version by default).
+  echo "Installing CUDA ${CUDA_VERSION} development tools from nvidia channel..."
+  conda install -y -c nvidia -c conda-forge \
+    "cuda-cudart-dev=${CUDA_VERSION}.*" \
+    "cuda-cudart-static=${CUDA_VERSION}.*" \
+    "cuda-nvcc=${CUDA_VERSION}.*" \
+    "cuda-nvrtc-dev=${CUDA_VERSION}.*" \
+    "libcublas-dev=${CUDA_VERSION}.*" \
+    "cuda-cccl=${CUDA_VERSION}.*"
+else
+  echo "Skipping CUDA dev tool install (MOMENTUM_SKIP_CUDA_DEV=1)."
+fi
 
 echo "Installing build tools into '${BUILD_ENV_NAME}'..."
 conda install -y -c conda-forge \
@@ -101,8 +124,26 @@ conda install -y -c conda-forge \
 echo "Installing Python packaging tools via pip..."
 pip install jinja2 patchelf auditwheel setuptools-scm setuptools
 
+echo "Second verification of PyTorch CUDA..."
+CUDA_AVAILABLE=$(python -c "import torch; print(torch.cuda.is_available())")
+TORCH_VERSION=$(python -c "import torch; print(torch.__version__)")
+CUDA_VERSION=$(python -c "import torch; print(torch.version.cuda)")
+
+echo "PyTorch version: ${TORCH_VERSION}"
+echo "CUDA version: ${CUDA_VERSION}"
+echo "CUDA available: ${CUDA_AVAILABLE}"
+
+if [[ "${CUDA_AVAILABLE}" != "True" ]]; then
+  echo "ERROR: PyTorch CUDA was replaced/broken during dependency installation!" >&2
+  echo "Please investigate the conda dependency resolution." >&2
+  exit 1
+fi
+echo "PyTorch CUDA verification passed!"
+
 # Remove any pip-installed NVIDIA CUDA wheels that can conflict with conda CUDA libs.
-python - <<'PY'
+REMOVE_PIP_NVIDIA="${MOMENTUM_REMOVE_PIP_NVIDIA:-1}"
+if [[ "${REMOVE_PIP_NVIDIA}" == "1" ]]; then
+  python - <<'PY'
 import importlib.metadata as md
 import subprocess
 import sys
@@ -111,6 +152,7 @@ pkgs = [d.metadata["Name"] for d in md.distributions() if d.metadata["Name"].low
 if pkgs:
     subprocess.check_call([sys.executable, "-m", "pip", "uninstall", "-y", *pkgs])
 PY
+fi
 
 # nvcc expects NVVM under targets/x86_64-linux; conda places it at $CONDA_PREFIX/nvvm.
 if [[ ! -e "${CONDA_PREFIX}/targets/x86_64-linux/nvvm" ]] && [[ -d "${CONDA_PREFIX}/nvvm" ]]; then
@@ -122,6 +164,14 @@ export CMAKE_PREFIX_PATH="${CONDA_PREFIX}"
 export CUDA_HOME="${CONDA_PREFIX}"
 export CUDA_TOOLKIT_ROOT_DIR="${CONDA_PREFIX}"
 export CUDACXX="${CONDA_PREFIX}/bin/nvcc"
+if [[ -d "${CONDA_PREFIX}/targets/x86_64-linux" ]]; then
+  export CUDAToolkit_ROOT="${CONDA_PREFIX}/targets/x86_64-linux"
+  export CUDA_HOME="${CONDA_PREFIX}/targets/x86_64-linux"
+  export CUDA_TOOLKIT_ROOT_DIR="${CONDA_PREFIX}/targets/x86_64-linux"
+fi
+if [[ -f "${CONDA_PREFIX}/lib/libcudart.so" ]]; then
+  export CMAKE_ARGS="${CMAKE_ARGS:-} -DCUDA_CUDART_LIBRARY=${CONDA_PREFIX}/lib/libcudart.so -DCUDAToolkit_ROOT=${CUDA_TOOLKIT_ROOT_DIR}"
+fi
 export PATH="${CONDA_PREFIX}/bin:${PATH}"
 export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${TORCH_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
 
@@ -131,6 +181,103 @@ export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH}:${TORCH_CMAKE_PATH}"
 export Torch_DIR="${TORCH_PREFIX}/share/cmake/Torch"
 if [[ ! -f "${Torch_DIR}/TorchConfig.cmake" ]] && [[ -d "${TORCH_CMAKE_PATH}/Torch" ]]; then
   export Torch_DIR="${TORCH_CMAKE_PATH}/Torch"
+fi
+
+# Match Torch C++ string ABI for all targets (pybind modules and core libs).
+TORCH_ABI="$("${TORCH_PY}" -c 'import torch; print(int(torch._C._GLIBCXX_USE_CXX11_ABI))')"
+export MOMENTUM_GLIBCXX_ABI="${TORCH_ABI}"
+export CXXFLAGS="-D_GLIBCXX_USE_CXX11_ABI=${TORCH_ABI} ${CXXFLAGS:-}"
+export CMAKE_ARGS="${CMAKE_ARGS:-} -DMOMENTUM_GLIBCXX_ABI=${TORCH_ABI} -DCMAKE_CXX_FLAGS=-D_GLIBCXX_USE_CXX11_ABI=${TORCH_ABI}"
+
+# Build C++ dependencies from source with matching ABI if Torch uses the old C++ string ABI.
+if [[ "${TORCH_ABI}" == "0" ]]; then
+  DEPS_PREFIX="${PWD}/build/deps-install"
+  mkdir -p "${DEPS_PREFIX}"
+
+  # Common CMake flags for all dependencies
+  COMMON_CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=${DEPS_PREFIX} -DBUILD_SHARED_LIBS=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_CXX_FLAGS=-D_GLIBCXX_USE_CXX11_ABI=${TORCH_ABI}"
+
+  # Build ezc3d
+  EZC3D_SRC="${PWD}/build/ezc3d-src"
+  if [[ ! -d "${EZC3D_SRC}" ]]; then
+    echo "Cloning ezc3d source..."
+    git clone --depth 1 https://github.com/pyomeca/ezc3d.git "${EZC3D_SRC}"
+  fi
+  echo "Building ezc3d (ABI=${TORCH_ABI})..."
+  cmake -S "${EZC3D_SRC}" -B "${EZC3D_SRC}/build" ${COMMON_CMAKE_FLAGS}
+  cmake --build "${EZC3D_SRC}/build" --target install -j"$(nproc)"
+
+  # Build console_bridge (urdfdom dependency)
+  CONSOLE_BRIDGE_SRC="${PWD}/build/console_bridge-src"
+  if [[ ! -d "${CONSOLE_BRIDGE_SRC}" ]]; then
+    echo "Cloning console_bridge source..."
+    git clone --depth 1 https://github.com/ros/console_bridge.git "${CONSOLE_BRIDGE_SRC}"
+  fi
+  echo "Building console_bridge (ABI=${TORCH_ABI})..."
+  cmake -S "${CONSOLE_BRIDGE_SRC}" -B "${CONSOLE_BRIDGE_SRC}/build" ${COMMON_CMAKE_FLAGS}
+  cmake --build "${CONSOLE_BRIDGE_SRC}/build" --target install -j"$(nproc)"
+
+  # Build urdfdom_headers (urdfdom dependency)
+  URDFDOM_HEADERS_SRC="${PWD}/build/urdfdom_headers-src"
+  if [[ ! -d "${URDFDOM_HEADERS_SRC}" ]]; then
+    echo "Cloning urdfdom_headers source..."
+    git clone --depth 1 https://github.com/ros/urdfdom_headers.git "${URDFDOM_HEADERS_SRC}"
+  fi
+  echo "Building urdfdom_headers (ABI=${TORCH_ABI})..."
+  cmake -S "${URDFDOM_HEADERS_SRC}" -B "${URDFDOM_HEADERS_SRC}/build" ${COMMON_CMAKE_FLAGS}
+  cmake --build "${URDFDOM_HEADERS_SRC}/build" --target install -j"$(nproc)"
+
+  # Build urdfdom
+  URDFDOM_SRC="${PWD}/build/urdfdom-src"
+  if [[ ! -d "${URDFDOM_SRC}" ]]; then
+    echo "Cloning urdfdom source..."
+    git clone --depth 1 https://github.com/ros/urdfdom.git "${URDFDOM_SRC}"
+  fi
+  echo "Building urdfdom (ABI=${TORCH_ABI})..."
+  cmake -S "${URDFDOM_SRC}" -B "${URDFDOM_SRC}/build" ${COMMON_CMAKE_FLAGS} \
+    -DCMAKE_PREFIX_PATH="${DEPS_PREFIX}" \
+    -Dconsole_bridge_DIR="${DEPS_PREFIX}/lib/cmake/console_bridge" \
+    -Durdfdom_headers_DIR="${DEPS_PREFIX}/lib/cmake/urdfdom_headers"
+  cmake --build "${URDFDOM_SRC}/build" --target install -j"$(nproc)"
+
+  # Build abseil-cpp (dependency of re2) with old ABI
+  ABSL_SRC="${PWD}/build/abseil-cpp-src"
+  if [[ ! -d "${ABSL_SRC}" ]]; then
+    echo "Cloning abseil-cpp source..."
+    git clone --depth 1 --branch 20250512.0 https://github.com/abseil/abseil-cpp.git "${ABSL_SRC}"
+  fi
+  echo "Building abseil-cpp (ABI=${TORCH_ABI})..."
+  cmake -S "${ABSL_SRC}" -B "${ABSL_SRC}/build" ${COMMON_CMAKE_FLAGS} \
+    -DABSL_BUILD_TESTING=OFF -DABSL_PROPAGATE_CXX_STD=ON
+  cmake --build "${ABSL_SRC}/build" --target install -j"$(nproc)"
+
+  # Build re2 with old ABI (using our absl)
+  RE2_SRC="${PWD}/build/re2-src"
+  if [[ ! -d "${RE2_SRC}" ]]; then
+    echo "Cloning re2 source..."
+    git clone --depth 1 https://github.com/google/re2.git "${RE2_SRC}"
+  fi
+  echo "Building re2 (ABI=${TORCH_ABI})..."
+  cmake -S "${RE2_SRC}" -B "${RE2_SRC}/build" ${COMMON_CMAKE_FLAGS} -DRE2_BUILD_TESTING=OFF \
+    -DCMAKE_PREFIX_PATH="${DEPS_PREFIX}"
+  cmake --build "${RE2_SRC}/build" --target install -j"$(nproc)"
+
+  # Build dispenso with old ABI
+  DISPENSO_SRC="${PWD}/build/dispenso-src"
+  if [[ ! -d "${DISPENSO_SRC}" ]]; then
+    echo "Cloning dispenso source..."
+    git clone --depth 1 https://github.com/facebookincubator/dispenso.git "${DISPENSO_SRC}"
+  fi
+  echo "Building dispenso (ABI=${TORCH_ABI})..."
+  cmake -S "${DISPENSO_SRC}" -B "${DISPENSO_SRC}/build" ${COMMON_CMAKE_FLAGS} -DDISPENSO_BUILD_TESTS=OFF
+  cmake --build "${DISPENSO_SRC}/build" --target install -j"$(nproc)"
+
+  # Update paths for all dependencies - deps-install MUST come first to override conda packages
+  export CMAKE_PREFIX_PATH="${DEPS_PREFIX}:${CMAKE_PREFIX_PATH}"
+  export LD_LIBRARY_PATH="${DEPS_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
+  export LIBRARY_PATH="${DEPS_PREFIX}/lib:${LIBRARY_PATH:-}"
+  # Also add to CPATH to ensure headers are found
+  export CPATH="${DEPS_PREFIX}/include:${DEPS_PREFIX}/include/dispenso/third-party/moodycamel:${CPATH:-}"
 fi
 
 # Generate pyproject.toml variants
@@ -148,20 +295,66 @@ echo "Building ${VARIANT} wheel for Python ${PY_VER} using torch from '${TORCH_E
 cp pyproject.toml pyproject.toml.bak
 cp "pyproject-pypi-${VARIANT}.toml" pyproject.toml 2>/dev/null || cp "pyproject-pypi-${VARIANT}-py${PY_SUFFIX}.toml" pyproject.toml
 
-rm -rf dist build
+# Clean old build artifacts but preserve deps-install
+rm -rf dist
+# Only remove pymomentum build artifacts, keep deps
+rm -rf build/cp*
 mkdir -p dist
 
-export CMAKE_ARGS="-DMOMENTUM_ENABLE_FBX_SAVING=OFF -DMOMENTUM_ENABLE_SIMD=OFF -DMOMENTUM_USE_SYSTEM_GOOGLETEST=ON -DMOMENTUM_USE_SYSTEM_PYBIND11=OFF -DMOMENTUM_USE_SYSTEM_RERUN_CPP_SDK=ON -DBUILD_SHARED_LIBS=OFF -DMOMENTUM_BUILD_RENDERER=OFF -Ddrjit_DIR=${CONDA_PREFIX}/share/cmake/drjit"
+# Build CMAKE_ARGS with deps prefix if we built deps from source
+# CRITICAL: Always include ABI flags in CMAKE_ARGS - these MUST be present for all builds
+ABI_FLAGS="-DMOMENTUM_GLIBCXX_ABI=${TORCH_ABI} -DCMAKE_CXX_FLAGS=-D_GLIBCXX_USE_CXX11_ABI=${TORCH_ABI}"
+
+if [[ -d "${PWD}/build/deps-install" ]]; then
+  DEPS_PREFIX="${PWD}/build/deps-install"
+  # Put DEPS_PREFIX first in CMAKE_PREFIX_PATH to override conda packages
+  export CMAKE_PREFIX_PATH="${DEPS_PREFIX}:${CMAKE_PREFIX_PATH}"
+  # Add explicit include paths for concurrentqueue.h and other third-party headers
+  export CMAKE_INCLUDE_PATH="${DEPS_PREFIX}/include:${DEPS_PREFIX}/include/dispenso/third-party/moodycamel:${CMAKE_INCLUDE_PATH:-}"
+
+  # CRITICAL: Hide conda's dispenso to force CMake to use our old-ABI version
+  # The conda dispenso is missing concurrentqueue.h and uses new ABI
+  if [[ -d "${CONDA_PREFIX}/include/dispenso" ]]; then
+    echo "Temporarily hiding conda dispenso headers..."
+    mv "${CONDA_PREFIX}/include/dispenso" "${CONDA_PREFIX}/include/dispenso.conda.bak" 2>/dev/null || true
+  fi
+
+  export CMAKE_ARGS="${ABI_FLAGS} -DMOMENTUM_ENABLE_FBX_SAVING=OFF -DMOMENTUM_ENABLE_SIMD=OFF -DMOMENTUM_USE_SYSTEM_GOOGLETEST=ON -DMOMENTUM_USE_SYSTEM_PYBIND11=OFF -DMOMENTUM_USE_SYSTEM_RERUN_CPP_SDK=ON -DBUILD_SHARED_LIBS=OFF -DMOMENTUM_BUILD_RENDERER=OFF -Ddrjit_DIR=${CONDA_PREFIX}/share/cmake/drjit -DCMAKE_PREFIX_PATH=${DEPS_PREFIX}\;${CONDA_PREFIX} -Durdfdom_DIR=${DEPS_PREFIX}/lib/cmake/urdfdom -Dezc3d_DIR=${DEPS_PREFIX}/lib/cmake/ezc3d -Dre2_DIR=${DEPS_PREFIX}/lib/cmake/re2 -DDispenso_DIR=${DEPS_PREFIX}/lib/cmake/Dispenso-1.4.0"
+else
+  export CMAKE_ARGS="${ABI_FLAGS} -DMOMENTUM_ENABLE_FBX_SAVING=OFF -DMOMENTUM_ENABLE_SIMD=OFF -DMOMENTUM_USE_SYSTEM_GOOGLETEST=ON -DMOMENTUM_USE_SYSTEM_PYBIND11=OFF -DMOMENTUM_USE_SYSTEM_RERUN_CPP_SDK=ON -DBUILD_SHARED_LIBS=OFF -DMOMENTUM_BUILD_RENDERER=OFF -Ddrjit_DIR=${CONDA_PREFIX}/share/cmake/drjit"
+fi
+
+# Function to restore conda dispenso headers
+restore_conda_dispenso() {
+  if [[ -d "${CONDA_PREFIX}/include/dispenso.conda.bak" ]]; then
+    echo "Restoring conda dispenso headers..."
+    mv "${CONDA_PREFIX}/include/dispenso.conda.bak" "${CONDA_PREFIX}/include/dispenso" 2>/dev/null || true
+  fi
+}
+
+# Set trap to restore on exit
+trap restore_conda_dispenso EXIT
+
+pip install -e . --no-deps --no-build-isolation
 
 echo "Running pip wheel..."
 pip wheel . --no-deps --no-build-isolation --wheel-dir=dist
 
 mv pyproject.toml.bak pyproject.toml
 
+# Restore conda dispenso headers
+restore_conda_dispenso
+trap - EXIT
+
 echo "Repairing wheel with auditwheel..."
+# Add deps lib path to LD_LIBRARY_PATH for auditwheel to find them
+if [[ -d "${PWD}/build/deps-install/lib" ]]; then
+  export LD_LIBRARY_PATH="${PWD}/build/deps-install/lib:${LD_LIBRARY_PATH:-}"
+fi
 auditwheel repair \
     --exclude 'libtorch*.so' --exclude 'libc10*.so' \
     --exclude 'libcu*.so*' --exclude 'libnv*.so*' --exclude 'libmkl*.so' \
+    --exclude 'libgomp*.so*' --exclude 'libstdc++*.so*' --exclude 'libgcc_s*.so*' \
     dist/pymomentum_*.whl -w dist/repaired
 
 echo "Done. Wheel is in dist/repaired/"
