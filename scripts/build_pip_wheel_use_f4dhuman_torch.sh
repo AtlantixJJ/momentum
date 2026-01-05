@@ -66,9 +66,17 @@ conda activate "${BUILD_ENV_NAME}"
 export PYTHONNOUSERSITE=1
 echo "Set PYTHONNOUSERSITE=1 to isolate conda environment from user site-packages"
 
+# Determine install command (prefer mamba if available)
+if command -v mamba &> /dev/null; then
+    INSTALL_CMD="mamba"
+else
+    echo "mamba not found, falling back to conda (this might be slower)..."
+    INSTALL_CMD="conda"
+fi
+
 # Install PyTorch with CUDA support into build env (use 2.5.1 like the working script)
 echo "Installing PyTorch 2.5.1 with CUDA ${CUDA_VERSION} support into build env..."
-conda install -y -c pytorch -c nvidia \
+"$INSTALL_CMD" install -y -c pytorch -c nvidia \
     "pytorch==2.5.1" \
     "torchvision==0.20.1" \
     "torchaudio==2.5.1" \
@@ -97,7 +105,7 @@ CUDA_VERSION="${TORCH_CUDA_VERSION}"
 if [[ "${SKIP_CUDA_DEV}" != "1" ]]; then
   # Install CUDA dev tools from nvidia channel (match torch CUDA version by default).
   echo "Installing CUDA ${CUDA_VERSION} development tools from nvidia channel..."
-  conda install -y -c nvidia -c conda-forge \
+  "$INSTALL_CMD" install -y -c nvidia -c conda-forge \
     "cuda-cudart-dev=${CUDA_VERSION}.*" \
     "cuda-cudart-static=${CUDA_VERSION}.*" \
     "cuda-nvcc=${CUDA_VERSION}.*" \
@@ -109,7 +117,7 @@ else
 fi
 
 echo "Installing build tools into '${BUILD_ENV_NAME}'..."
-conda install -y -c conda-forge \
+"$INSTALL_CMD" install -y -c conda-forge \
   cmake \
   ninja \
   pybind11 \
@@ -118,7 +126,7 @@ conda install -y -c conda-forge \
   "gcc_linux-64=12.*"
 
 echo "Installing C++ dependencies into '${BUILD_ENV_NAME}'..."
-conda install -y -c conda-forge \
+"$INSTALL_CMD" install -y -c conda-forge \
   ceres-solver \
   cli11 \
   dispenso \

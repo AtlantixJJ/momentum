@@ -50,7 +50,7 @@ fi
 # STEP 1: Install PyTorch with CUDA FIRST (before any other packages)
 # ============================================================================
 echo "Installing PyTorch 2.5.1 with CUDA 12.1 support..."
-conda install -y -c pytorch -c nvidia \
+"$INSTALL_CMD" install -y -c pytorch -c nvidia \
   "pytorch==2.5.1" \
   "torchvision==0.20.1" \
   "torchaudio==2.5.1" \
