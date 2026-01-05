@@ -12,7 +12,7 @@ fi
 
 # Parameters
 TORCH_ENV_NAME="${MOMENTUM_TORCH_ENV:-f4dhuman}"
-BUILD_ENV_NAME="${MOMENTUM_BUILD_ENV:-f4dhuman}"
+BUILD_ENV_NAME="${MOMENTUM_BUILD_ENV:-momentum_f4dhuman_build}"
 FORCE_RECREATE="${FORCE_RECREATE:-0}"
 TORCH_MIN_PY312="${MOMENTUM_TORCH_MIN_PY312:-2.5.1}"
 TORCH_MAX_PY312="${MOMENTUM_TORCH_MAX_PY312:-2.6}"
@@ -44,8 +44,16 @@ fi
 
 PY_VER="$("${TORCH_PY}" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")"
 
+# Use CUDA version from parameters (defaults to 12.1, same as the working new_env script)
+echo "Using CUDA version: ${CUDA_VERSION} (override with MOMENTUM_CUDA_VERSION)"
+
 # Create/Update build env
-if [[ "$FORCE_RECREATE" == "1" ]] || ! conda env list | awk '{print $1}' | grep -qx "${BUILD_ENV_NAME}"; then
+if [[ "$FORCE_RECREATE" == "1" ]] && conda env list | awk '{print $1}' | grep -qx "${BUILD_ENV_NAME}"; then
+  echo "Removing existing conda environment '${BUILD_ENV_NAME}'..."
+  conda env remove -n "${BUILD_ENV_NAME}" -y
+fi
+
+if ! conda env list | awk '{print $1}' | grep -qx "${BUILD_ENV_NAME}"; then
   echo "Creating conda env '${BUILD_ENV_NAME}' with python=${PY_VER}..."
   conda create -y -n "${BUILD_ENV_NAME}" "python=${PY_VER}"
 fi
@@ -53,11 +61,23 @@ fi
 echo "Activating build env '${BUILD_ENV_NAME}'..."
 conda activate "${BUILD_ENV_NAME}"
 
+# CRITICAL: Prevent Python from using packages from ~/.local/lib/pythonX.Y/site-packages
+# This ensures we use ONLY the conda environment's packages
+export PYTHONNOUSERSITE=1
+echo "Set PYTHONNOUSERSITE=1 to isolate conda environment from user site-packages"
+
+# Install PyTorch with CUDA support into build env (use 2.5.1 like the working script)
+echo "Installing PyTorch 2.5.1 with CUDA ${CUDA_VERSION} support into build env..."
+conda install -y -c pytorch -c nvidia \
+    "pytorch==2.5.1" \
+    "torchvision==0.20.1" \
+    "torchaudio==2.5.1" \
+    "pytorch-cuda=${CUDA_VERSION}"
+
 echo "First verification of PyTorch CUDA..."
 CUDA_AVAILABLE=$(python -c "import torch; print(torch.cuda.is_available())")
 TORCH_VERSION=$(python -c "import torch; print(torch.__version__)")
 TORCH_CUDA_VERSION=$(python -c "import torch; print(torch.version.cuda)")
-CUDA_VERSION="${MOMENTUM_CUDA_VERSION:-${TORCH_CUDA_VERSION}}"
 
 echo "PyTorch version: ${TORCH_VERSION}"
 echo "CUDA version: ${TORCH_CUDA_VERSION}"
@@ -70,6 +90,9 @@ if [[ "${CUDA_AVAILABLE}" != "True" ]]; then
 fi
 echo "PyTorch CUDA verification passed!"
 
+
+# Update CUDA_VERSION based on what was actually installed in the build env
+CUDA_VERSION="${TORCH_CUDA_VERSION}"
 
 if [[ "${SKIP_CUDA_DEV}" != "1" ]]; then
   # Install CUDA dev tools from nvidia channel (match torch CUDA version by default).
@@ -164,6 +187,14 @@ export CMAKE_PREFIX_PATH="${CONDA_PREFIX}"
 export CUDA_HOME="${CONDA_PREFIX}"
 export CUDA_TOOLKIT_ROOT_DIR="${CONDA_PREFIX}"
 export CUDACXX="${CONDA_PREFIX}/bin/nvcc"
+# Set CUDAHOSTCXX to ensure nvcc uses the correct host compiler from the build env
+export CUDAHOSTCXX="${CONDA_PREFIX}/bin/x86_64-conda-linux-gnu-g++"
+if [[ ! -f "${CUDAHOSTCXX}" ]]; then
+  # Fall back to plain g++ if wrapper doesn't exist
+  export CUDAHOSTCXX="$(which g++)"
+fi
+echo "Using CUDAHOSTCXX: ${CUDAHOSTCXX}"
+
 if [[ -d "${CONDA_PREFIX}/targets/x86_64-linux" ]]; then
   export CUDAToolkit_ROOT="${CONDA_PREFIX}/targets/x86_64-linux"
   export CUDA_HOME="${CONDA_PREFIX}/targets/x86_64-linux"
@@ -172,19 +203,25 @@ fi
 if [[ -f "${CONDA_PREFIX}/lib/libcudart.so" ]]; then
   export CMAKE_ARGS="${CMAKE_ARGS:-} -DCUDA_CUDART_LIBRARY=${CONDA_PREFIX}/lib/libcudart.so -DCUDAToolkit_ROOT=${CUDA_TOOLKIT_ROOT_DIR}"
 fi
+# Explicitly set CUDA host compiler for CMake to ensure nvcc uses the correct g++
+export CMAKE_ARGS="${CMAKE_ARGS:-} -DCMAKE_CUDA_HOST_COMPILER=${CUDAHOSTCXX}"
 export PATH="${CONDA_PREFIX}/bin:${PATH}"
-export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${TORCH_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
+# CRITICAL: Set LIBRARY_PATH for the linker to find CUDA static libraries during compilation
+export LIBRARY_PATH="${CONDA_PREFIX}/lib:${CONDA_PREFIX}/lib/stubs:${LIBRARY_PATH:-}"
+# Also set CPATH for header files
+export CPATH="${CONDA_PREFIX}/include:${CPATH:-}"
 
-# Point CMake to torch from f4dhuman
-TORCH_CMAKE_PATH="$("${TORCH_PY}" -c 'import torch; print(torch.utils.cmake_prefix_path)')"
+# Point CMake to torch from the build env (PyTorch is now installed here)
+TORCH_CMAKE_PATH="$(python -c 'import torch; print(torch.utils.cmake_prefix_path)')"
 export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH}:${TORCH_CMAKE_PATH}"
-export Torch_DIR="${TORCH_PREFIX}/share/cmake/Torch"
+export Torch_DIR="${CONDA_PREFIX}/share/cmake/Torch"
 if [[ ! -f "${Torch_DIR}/TorchConfig.cmake" ]] && [[ -d "${TORCH_CMAKE_PATH}/Torch" ]]; then
   export Torch_DIR="${TORCH_CMAKE_PATH}/Torch"
 fi
 
 # Match Torch C++ string ABI for all targets (pybind modules and core libs).
-TORCH_ABI="$("${TORCH_PY}" -c 'import torch; print(int(torch._C._GLIBCXX_USE_CXX11_ABI))')"
+TORCH_ABI="$(python -c 'import torch; print(int(torch._C._GLIBCXX_USE_CXX11_ABI))')"
 export MOMENTUM_GLIBCXX_ABI="${TORCH_ABI}"
 export CXXFLAGS="-D_GLIBCXX_USE_CXX11_ABI=${TORCH_ABI} ${CXXFLAGS:-}"
 export CMAKE_ARGS="${CMAKE_ARGS:-} -DMOMENTUM_GLIBCXX_ABI=${TORCH_ABI} -DCMAKE_CXX_FLAGS=-D_GLIBCXX_USE_CXX11_ABI=${TORCH_ABI}"
@@ -194,8 +231,23 @@ if [[ "${TORCH_ABI}" == "0" ]]; then
   DEPS_PREFIX="${PWD}/build/deps-install"
   mkdir -p "${DEPS_PREFIX}"
 
-  # Common CMake flags for all dependencies
-  COMMON_CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=${DEPS_PREFIX} -DBUILD_SHARED_LIBS=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_CXX_FLAGS=-D_GLIBCXX_USE_CXX11_ABI=${TORCH_ABI}"
+  # Clear any cached compiler paths that might point to wrong env
+  unset CMAKE_C_COMPILER CMAKE_CXX_COMPILER CC CXX
+
+  # Clean deps build directories if FORCE_RECREATE is set (they may have cached wrong compiler paths)
+  if [[ "${FORCE_RECREATE}" == "1" ]]; then
+    echo "Cleaning old deps build directories..."
+    rm -rf "${PWD}/build/ezc3d-src/build" 2>/dev/null || true
+    rm -rf "${PWD}/build/console_bridge-src/build" 2>/dev/null || true
+    rm -rf "${PWD}/build/urdfdom_headers-src/build" 2>/dev/null || true
+    rm -rf "${PWD}/build/urdfdom-src/build" 2>/dev/null || true
+    rm -rf "${PWD}/build/abseil-cpp-src/build" 2>/dev/null || true
+    rm -rf "${PWD}/build/re2-src/build" 2>/dev/null || true
+    rm -rf "${PWD}/build/dispenso-src/build" 2>/dev/null || true
+  fi
+
+  # Common CMake flags for all dependencies - explicitly use gcc/g++ from PATH
+  COMMON_CMAKE_FLAGS="-DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=${DEPS_PREFIX} -DBUILD_SHARED_LIBS=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_CXX_FLAGS=-D_GLIBCXX_USE_CXX11_ABI=${TORCH_ABI} -DCMAKE_C_FLAGS=-D_GLIBCXX_USE_CXX11_ABI=${TORCH_ABI}"
 
   # Build ezc3d
   EZC3D_SRC="${PWD}/build/ezc3d-src"
@@ -278,6 +330,15 @@ if [[ "${TORCH_ABI}" == "0" ]]; then
   export LIBRARY_PATH="${DEPS_PREFIX}/lib:${LIBRARY_PATH:-}"
   # Also add to CPATH to ensure headers are found
   export CPATH="${DEPS_PREFIX}/include:${DEPS_PREFIX}/include/dispenso/third-party/moodycamel:${CPATH:-}"
+
+  # Patch rpaths for deps shared objects to avoid conda env conflicts
+  if command -v patchelf >/dev/null 2>&1; then
+    echo "Patching deps rpaths to avoid conda conflicts..."
+    find "${DEPS_PREFIX}/lib" -name 'libabsl_*.so*' -print0 2>/dev/null | xargs -0 -P 8 -n 1 patchelf --set-rpath "${DEPS_PREFIX}/lib" 2>/dev/null || true
+    if [[ -f "${DEPS_PREFIX}/lib/libre2.so.11" ]]; then
+      patchelf --set-rpath "${DEPS_PREFIX}/lib" "${DEPS_PREFIX}/lib/libre2.so.11" 2>/dev/null || true
+    fi
+  fi
 fi
 
 # Generate pyproject.toml variants
@@ -319,9 +380,9 @@ if [[ -d "${PWD}/build/deps-install" ]]; then
     mv "${CONDA_PREFIX}/include/dispenso" "${CONDA_PREFIX}/include/dispenso.conda.bak" 2>/dev/null || true
   fi
 
-  export CMAKE_ARGS="${ABI_FLAGS} -DMOMENTUM_ENABLE_FBX_SAVING=OFF -DMOMENTUM_ENABLE_SIMD=OFF -DMOMENTUM_USE_SYSTEM_GOOGLETEST=ON -DMOMENTUM_USE_SYSTEM_PYBIND11=OFF -DMOMENTUM_USE_SYSTEM_RERUN_CPP_SDK=ON -DBUILD_SHARED_LIBS=OFF -DMOMENTUM_BUILD_RENDERER=OFF -Ddrjit_DIR=${CONDA_PREFIX}/share/cmake/drjit -DCMAKE_PREFIX_PATH=${DEPS_PREFIX}\;${CONDA_PREFIX} -Durdfdom_DIR=${DEPS_PREFIX}/lib/cmake/urdfdom -Dezc3d_DIR=${DEPS_PREFIX}/lib/cmake/ezc3d -Dre2_DIR=${DEPS_PREFIX}/lib/cmake/re2 -DDispenso_DIR=${DEPS_PREFIX}/lib/cmake/Dispenso-1.4.0"
+  export CMAKE_ARGS="${ABI_FLAGS} -DMOMENTUM_ENABLE_FBX_SAVING=OFF -DMOMENTUM_ENABLE_SIMD=OFF -DMOMENTUM_USE_SYSTEM_GOOGLETEST=ON -DMOMENTUM_USE_SYSTEM_PYBIND11=OFF -DMOMENTUM_USE_SYSTEM_RERUN_CPP_SDK=ON -DBUILD_SHARED_LIBS=OFF -DMOMENTUM_BUILD_RENDERER=OFF -Ddrjit_DIR=${CONDA_PREFIX}/share/cmake/drjit -DCMAKE_PREFIX_PATH=${DEPS_PREFIX}\;${CONDA_PREFIX} -Durdfdom_DIR=${DEPS_PREFIX}/lib/cmake/urdfdom -Dezc3d_DIR=${DEPS_PREFIX}/lib/cmake/ezc3d -Dre2_DIR=${DEPS_PREFIX}/lib/cmake/re2 -DDispenso_DIR=${DEPS_PREFIX}/lib/cmake/Dispenso-1.4.0 -DCMAKE_INSTALL_RPATH=${DEPS_PREFIX}/lib:${CONDA_PREFIX}/lib:\\\$ORIGIN/../torch/lib -DCMAKE_BUILD_RPATH=${DEPS_PREFIX}/lib:${CONDA_PREFIX}/lib -DCMAKE_INSTALL_RPATH_USE_LINK_PATH=OFF"
 else
-  export CMAKE_ARGS="${ABI_FLAGS} -DMOMENTUM_ENABLE_FBX_SAVING=OFF -DMOMENTUM_ENABLE_SIMD=OFF -DMOMENTUM_USE_SYSTEM_GOOGLETEST=ON -DMOMENTUM_USE_SYSTEM_PYBIND11=OFF -DMOMENTUM_USE_SYSTEM_RERUN_CPP_SDK=ON -DBUILD_SHARED_LIBS=OFF -DMOMENTUM_BUILD_RENDERER=OFF -Ddrjit_DIR=${CONDA_PREFIX}/share/cmake/drjit"
+  export CMAKE_ARGS="${ABI_FLAGS} -DMOMENTUM_ENABLE_FBX_SAVING=OFF -DMOMENTUM_ENABLE_SIMD=OFF -DMOMENTUM_USE_SYSTEM_GOOGLETEST=ON -DMOMENTUM_USE_SYSTEM_PYBIND11=OFF -DMOMENTUM_USE_SYSTEM_RERUN_CPP_SDK=ON -DBUILD_SHARED_LIBS=OFF -DMOMENTUM_BUILD_RENDERER=OFF -Ddrjit_DIR=${CONDA_PREFIX}/share/cmake/drjit -DCMAKE_INSTALL_RPATH=${CONDA_PREFIX}/lib:\\\$ORIGIN/../torch/lib -DCMAKE_BUILD_RPATH=${CONDA_PREFIX}/lib -DCMAKE_INSTALL_RPATH_USE_LINK_PATH=OFF"
 fi
 
 # Function to restore conda dispenso headers
@@ -334,8 +395,6 @@ restore_conda_dispenso() {
 
 # Set trap to restore on exit
 trap restore_conda_dispenso EXIT
-
-pip install -e . --no-deps --no-build-isolation
 
 echo "Running pip wheel..."
 pip wheel . --no-deps --no-build-isolation --wheel-dir=dist
@@ -361,3 +420,36 @@ echo "Done. Wheel is in dist/repaired/"
 
 WHEEL_FILE=$(find dist -maxdepth 1 -name "*.whl" | head -n 1)
 echo "Generated wheel: ${WHEEL_FILE}"
+
+# Optional: install wheel into the build env and patch rpaths for local testing.
+INSTALL_WHEEL="${MOMENTUM_INSTALL_WHEEL:-1}"
+if [[ "${INSTALL_WHEEL}" == "1" ]]; then
+  echo "Installing wheel into '${BUILD_ENV_NAME}'..."
+  pip install --force-reinstall --no-deps "${WHEEL_FILE}"
+
+  # Patch pymomentum rpaths to prefer local deps over conda packages
+  DEPS_PREFIX="${PWD}/build/deps-install"
+  if command -v patchelf >/dev/null 2>&1; then
+    echo "Patching pymomentum rpaths to prefer local deps..."
+    for so in "${CONDA_PREFIX}"/lib/python*/site-packages/pymomentum/*.so; do
+      if [[ -f "${so}" ]]; then
+        if [[ -d "${DEPS_PREFIX}" ]]; then
+          patchelf --set-rpath "${DEPS_PREFIX}/lib:${CONDA_PREFIX}/lib:\$ORIGIN/../torch/lib" "${so}" 2>/dev/null || true
+        else
+          patchelf --set-rpath "${CONDA_PREFIX}/lib:\$ORIGIN/../torch/lib" "${so}" 2>/dev/null || true
+        fi
+      fi
+    done
+  fi
+fi
+
+# Final summary
+echo ""
+echo "============================================"
+echo "Build Summary:"
+echo "  Build Environment: ${BUILD_ENV_NAME}"
+echo "  Torch Environment: ${TORCH_ENV_NAME}"
+echo "  PyTorch: ${TORCH_VERSION}"
+echo "  CUDA: ${CUDA_VERSION}"
+echo "  Wheel: ${WHEEL_FILE}"
+echo "============================================"
