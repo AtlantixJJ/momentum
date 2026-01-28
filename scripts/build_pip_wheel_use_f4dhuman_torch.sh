@@ -74,6 +74,8 @@ else
     INSTALL_CMD="conda"
 fi
 
+INSTALL_CMD="conda"
+
 # Install PyTorch with CUDA support into build env (use 2.5.1 like the working script)
 echo "Installing PyTorch 2.5.1 with CUDA ${CUDA_VERSION} support into build env..."
 "$INSTALL_CMD" install -y -c pytorch -c nvidia \
@@ -123,10 +125,7 @@ echo "Installing build tools into '${BUILD_ENV_NAME}'..."
   pybind11 \
   scikit-build-core \
   "gxx_linux-64=12.*" \
-  "gcc_linux-64=12.*"
-
-echo "Installing C++ dependencies into '${BUILD_ENV_NAME}'..."
-"$INSTALL_CMD" install -y -c conda-forge \
+  "gcc_linux-64=12.*" \
   ceres-solver \
   cli11 \
   dispenso \
