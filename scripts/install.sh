@@ -195,6 +195,29 @@ export CMAKE_PREFIX_PATH="${CONDA_PREFIX}"
 export CUDA_HOME="${CONDA_PREFIX}"
 export CUDA_TOOLKIT_ROOT_DIR="${CONDA_PREFIX}"
 export CUDACXX="${CONDA_PREFIX}/bin/nvcc"
+# Prefer the conda-forge compiler wrappers over the system toolchain.
+# Ubuntu 20.04's default GCC 9 does not provide the C++20 <span> header.
+export CC="${CONDA_PREFIX}/bin/x86_64-conda-linux-gnu-gcc"
+export CXX="${CONDA_PREFIX}/bin/x86_64-conda-linux-gnu-g++"
+if [[ ! -x "${CC}" ]]; then
+  export CC="$(which gcc)"
+fi
+if [[ ! -x "${CXX}" ]]; then
+  export CXX="$(which g++)"
+fi
+# CMake keeps auto-detecting plain cc/c++ names, so expose the conda wrappers
+# under the generic compiler names in the build env.
+if [[ -x "${CONDA_PREFIX}/bin/x86_64-conda-linux-gnu-gcc" ]]; then
+  ln -sf "${CONDA_PREFIX}/bin/x86_64-conda-linux-gnu-gcc" "${CONDA_PREFIX}/bin/gcc"
+  ln -sf "${CONDA_PREFIX}/bin/x86_64-conda-linux-gnu-gcc" "${CONDA_PREFIX}/bin/cc"
+fi
+if [[ -x "${CONDA_PREFIX}/bin/x86_64-conda-linux-gnu-g++" ]]; then
+  ln -sf "${CONDA_PREFIX}/bin/x86_64-conda-linux-gnu-g++" "${CONDA_PREFIX}/bin/g++"
+  ln -sf "${CONDA_PREFIX}/bin/x86_64-conda-linux-gnu-g++" "${CONDA_PREFIX}/bin/c++"
+fi
+hash -r
+echo "Using CC: ${CC}"
+echo "Using CXX: ${CXX}"
 # Set CUDAHOSTCXX to ensure nvcc uses the correct host compiler from the build env
 export CUDAHOSTCXX="${CONDA_PREFIX}/bin/x86_64-conda-linux-gnu-g++"
 if [[ ! -f "${CUDAHOSTCXX}" ]]; then
@@ -211,7 +234,8 @@ fi
 if [[ -f "${CONDA_PREFIX}/lib/libcudart.so" ]]; then
   export CMAKE_ARGS="${CMAKE_ARGS:-} -DCUDA_CUDART_LIBRARY=${CONDA_PREFIX}/lib/libcudart.so -DCUDAToolkit_ROOT=${CUDA_TOOLKIT_ROOT_DIR}"
 fi
-# Explicitly set CUDA host compiler for CMake to ensure nvcc uses the correct g++
+# Explicitly set the CUDA host compiler for CMake; C/C++ compilers are picked up
+# from the generic cc/c++ symlinks we expose in the build env above.
 export CMAKE_ARGS="${CMAKE_ARGS:-} -DCMAKE_CUDA_HOST_COMPILER=${CUDAHOSTCXX}"
 export PATH="${CONDA_PREFIX}/bin:${PATH}"
 export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
@@ -295,6 +319,7 @@ if [[ "${TORCH_ABI}" == "0" ]]; then
   fi
   echo "Building urdfdom (ABI=${TORCH_ABI})..."
   cmake -S "${URDFDOM_SRC}" -B "${URDFDOM_SRC}/build" ${COMMON_CMAKE_FLAGS} \
+    -DBUILD_TESTING=OFF \
     -DCMAKE_PREFIX_PATH="${DEPS_PREFIX}" \
     -Dconsole_bridge_DIR="${DEPS_PREFIX}/lib/cmake/console_bridge" \
     -Durdfdom_headers_DIR="${DEPS_PREFIX}/lib/cmake/urdfdom_headers"
@@ -315,12 +340,15 @@ if [[ "${TORCH_ABI}" == "0" ]]; then
   RE2_SRC="${PWD}/build/re2-src"
   if [[ ! -d "${RE2_SRC}" ]]; then
     echo "Cloning re2 source..."
-    git clone --depth 1 https://github.com/google/re2.git "${RE2_SRC}"
+    git clone --depth 1 --branch 2024-07-02 https://github.com/google/re2.git "${RE2_SRC}"
   fi
   echo "Building re2 (ABI=${TORCH_ABI})..."
+  RE2_OLD_CPATH="${CPATH:-}"
+  export CPATH="${DEPS_PREFIX}/include"
   cmake -S "${RE2_SRC}" -B "${RE2_SRC}/build" ${COMMON_CMAKE_FLAGS} -DRE2_BUILD_TESTING=OFF \
     -DCMAKE_PREFIX_PATH="${DEPS_PREFIX}"
   cmake --build "${RE2_SRC}/build" --target install -j"$(nproc)"
+  export CPATH="${RE2_OLD_CPATH}"
 
   # Build dispenso with old ABI
   DISPENSO_SRC="${PWD}/build/dispenso-src"
@@ -435,6 +463,10 @@ if [[ "${INSTALL_WHEEL}" == "1" ]]; then
   echo "Installing wheel into '${TORCH_ENV_NAME}'..."
   "${TORCH_PY}" -m pip install --force-reinstall --no-deps "${WHEEL_FILE}"
 
+  # Install runtime shared-library dependencies into the torch env
+  echo "Installing runtime dependencies (tinyxml2) into '${TORCH_ENV_NAME}'..."
+  conda install -y -n "${TORCH_ENV_NAME}" -c conda-forge tinyxml2
+
   # Patch pymomentum rpaths to prefer local deps over conda packages
   DEPS_PREFIX="${PWD}/build/deps-install"
   if command -v patchelf >/dev/null 2>&1; then
@@ -450,8 +482,18 @@ if [[ "${INSTALL_WHEEL}" == "1" ]]; then
     done
   fi
 
+  # Download MHR assets if missing
+  MHR_DIR="$(pwd)/../MHR"
+  if [[ ! -d "${MHR_DIR}/assets" ]]; then
+    echo "Downloading MHR assets..."
+    curl -L -o "${MHR_DIR}/assets.zip" \
+      https://github.com/facebookresearch/MHR/releases/download/v1.0.0/assets.zip
+    unzip -o "${MHR_DIR}/assets.zip" -d "${MHR_DIR}"
+    rm -f "${MHR_DIR}/assets.zip"
+  fi
+
   echo "Running test_mhr.py in '${TORCH_ENV_NAME}'..."
-  PYTHONPATH="${PYTHONPATH}:$(pwd)/../MHR" "${TORCH_PY}" test_mhr.py
+  PYTHONPATH="${PYTHONPATH}:${MHR_DIR}" "${TORCH_PY}" test_mhr.py
 fi
 
 # Final summary
